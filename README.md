@@ -105,7 +105,7 @@ the input lists names too. From the CLI: `herdr pane list`, `herdr agent list`,
 ## Requirements
 
 - Pi running inside Herdr (`HERDR_ENV=1`)
-- Extension auto-discovers from `~/.pi/agent/extensions/interactive-subagents/`
+- Extension auto-discovers from `~/.pi/agent/extensions/pi-swarm/`
 
 ## Reference
 
