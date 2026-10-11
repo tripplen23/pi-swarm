@@ -1,4 +1,8 @@
-# interactive-subagents
+# pi-swarm
+
+<p align="center">
+  <img src="assets/hero.png" alt="pi-swarm — async interactive subagents for pi" width="100%">
+</p>
 
 Async, interactive subagents for Pi, running in **Herdr** panes.
 
