@@ -2,7 +2,7 @@
 name: worker
 description: General-purpose worker — reads, writes, and edits code
 tools: read, write, edit, bash, web_search, web_fetch
-subagent_agents: scout, researcher
+subagent_agents: scout, researcher, qa
 model: opencode-go/deepseek-v4.1-flash
 thinking: high
 system-prompt: append
@@ -27,8 +27,9 @@ Your context is finite. Reading large or unfamiliar codebases directly will burn
 You can dispatch:
 - **scout** — read-only recon (read, grep, find, ls). Returns a structured map of files, line ranges, and key snippets. Cheap and fast. Use for *exploring unfamiliar territory*.
 - **researcher** — web research (web_search, web_fetch). Returns a sourced brief. Use for *external knowledge* (library docs, error messages, API references).
+- **qa** — QA/tester that drives a real browser (Playwright MCP). Verifies UI behavior and returns bug findings with evidence. Use to *verify a UI change you just made*.
 
-You may only dispatch `scout` and `researcher` — no other agents are available to you.
+You may only dispatch `scout`, `researcher`, and `qa` — no other agents are available to you.
 
 **Always select the agent with the `agent` field**, e.g. `subagent({ agent: "scout", name: "recon", task: "…" })`. The `name` field is only a cosmetic pane label — it does NOT pick the agent. If you put "scout" in `name` and leave `agent` empty, the spawn is rejected.
 
@@ -50,6 +51,10 @@ A good rhythm: **scout to find, read to edit.**
 
 Dispatch a researcher when the question is open-ended, or you'd need to search + read 3+ pages.
 Fetch directly when you already have the exact URL.
+
+### When to dispatch a qa
+
+Dispatch `qa` **after a UI/web-app change** when you want it verified in a real browser (does the page render, does the flow work, any console/network errors). Give it the URL and the expected behavior — it is read-only and reports findings, it does not fix code. Do **not** dispatch qa for non-UI work (backend, CLI, libraries) — run the project's own tests with `bash` instead.
 
 ### Parallelism
 

@@ -39,9 +39,10 @@ subagent({ agent: "worker", name: "dark-mode", task: "Implement the dark mode to
 | Agent | Model | Tools | Role |
 |-------|-------|-------|------|
 | **scout** | `opencode-go/deepseek-v4-flash` | read, grep, find, ls | Fast read-only recon |
-| **researcher** | `opencode-go/deepseek-v4.1-flash` | web_search, web_fetch, safe_bash | Web research → sourced brief |
-| **worker** | `opencode-go/deepseek-v4.1-flash` | read, write, edit, bash, web_search, web_fetch (+ spawns scout/researcher) | Implementer |
+| **researcher** | `opencode-go/deepseek-v4.1-flash` | web_search, web_fetch, safe_bash, codemode, mcp__firecrawl__* | Web research → sourced brief |
+| **worker** | `opencode-go/deepseek-v4.1-flash` | read, write, edit, bash, web_search, web_fetch (+ spawns scout/researcher/qa) | Implementer |
 | **reviewer** | `opencode-go/muse-spark-1.3-contributor` | read, grep, find, ls, safe_bash | Read-only code review |
+| **qa** | `opencode-go/deepseek-v4.1-flash` | read, grep, find, ls, safe_bash, codemode, mcp__playwright_chrome__*, mcp__playwright_webkit__* | Web-app QA via Playwright MCP |
 
 Model rationale:
 
@@ -53,6 +54,18 @@ Model rationale:
   affordable 1M-context model; review is a good fit for a cheaper tier.
 
 Override per spawn with `subagent({ agent, model })`, or edit the frontmatter.
+
+### MCP in subagents
+
+Subagents are sandboxed with `--no-extensions`, so MCP is **off by default**. An
+agent opts in by listing `codemode` plus MCP tools in its `tools` frontmatter
+(`mcp__<server>__*` patterns or explicit names). The extension then launches the
+child with `-e builtin:codemode -e builtin:mcp`, and the agent reaches the
+servers through `codemode` scripts.
+
+Using `codemode` is deliberate for token efficiency: only the script's output
+enters the agent's context, so large browser accessibility snapshots never pile
+up in it. See `agents/qa.md` for the pattern.
 
 ## Custom agents
 

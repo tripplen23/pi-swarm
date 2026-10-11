@@ -215,6 +215,13 @@ function getToolExtensionPath(tool: string): string | undefined {
   if ((SPAWNING_TOOLS as readonly string[]).includes(tool)) {
     return fileURLToPath(import.meta.url);
   }
+  // MCP tools come from the built-in MCP extension, not a file on disk. The
+  // child re-enables it with `-e builtin:mcp` (see applySandboxToParts) so the
+  // agent reaches the servers via codemode.
+  if (tool.startsWith("mcp__")) return "builtin:mcp";
+  // codemode is a built-in extension registered inactive; the MCP extension
+  // alone does not activate it under --no-extensions, so load it explicitly.
+  if (tool === "codemode") return "builtin:codemode";
   const extBase = join(getAgentConfigDir(), "extensions");
   const map: Record<string, string> = {
     web_search: join(extBase, "web-search-fallback.ts"),
@@ -223,8 +230,7 @@ function getToolExtensionPath(tool: string): string | undefined {
     youtube_search: join(extBase, "youtube-search", "index.ts"),
     google_image_search: join(extBase, "google-image-search", "index.ts"),
     safe_bash: join(SUBAGENTS_DIR, "tools", "safe-bash.ts"),
-  };
-  // Prefer the built-in path, but fall back to a runtime-registered extension
+  };  // Prefer the built-in path, but fall back to a runtime-registered extension
   // when that path no longer exists on disk (e.g. a built-in tool extension
   // was disabled/removed but a project-local extension re-registered it).
   const builtin = map[tool];
@@ -867,7 +873,8 @@ function applySandboxToParts(
     const extPaths = new Set<string>();
     for (const tool of loadout.toolAllowlist.split(",")) {
       const extPath = getToolExtensionPath(tool);
-      if (extPath && existsSync(extPath)) extPaths.add(extPath);
+      // `builtin:<name>` is a built-in extension, not a filesystem path.
+      if (extPath && (extPath.startsWith("builtin:") || existsSync(extPath))) extPaths.add(extPath);
     }
     for (const extPath of extPaths) {
       parts.push("-e", shellEscape(extPath));
