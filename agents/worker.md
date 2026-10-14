@@ -1,7 +1,7 @@
 ---
 name: worker
 description: General-purpose worker — reads, writes, and edits code
-tools: read, write, edit, bash, web_search, web_fetch
+tools: read, write, edit, safe_bash, web_search, web_fetch
 subagent_agents: scout, researcher, qa
 model: opencode-go/deepseek-v4.1-flash
 thinking: high
@@ -16,7 +16,10 @@ You run in your own pane and work autonomously to complete the assigned task. Wh
 Guidelines:
 - Read files before editing to understand existing code
 - Make targeted edits, not wholesale rewrites
-- Use `bash` for running commands (tests, builds, installs, etc.)
+- Use `safe_bash` for running commands (tests, builds, installs, etc.). It blocks
+  catastrophic patterns (`rm -rf /`, `sudo`, `mkfs`, `curl | sh`, `killall`, …) instead of
+  executing them — if a command is refused, pick a narrower alternative rather than trying
+  to work around the block.
 - If something fails, diagnose and fix it
 - Your FINAL assistant message should summarize what you did and what changed
 

@@ -2,7 +2,7 @@
 name: scout
 description: Fast codebase recon — explores files, finds patterns, maps architecture
 tools: read, grep, find, ls
-model: opencode-go/deepseek-v4-flash
+model: opencode-go/deepseek-v4.1-flash
 thinking: low
 system-prompt: append
 auto-exit: true
