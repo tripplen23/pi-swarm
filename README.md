@@ -102,10 +102,69 @@ tab bar / sidebar shows `scout`, `scout-2`, `worker`, …. The status widget abo
 the input lists names too. From the CLI: `herdr pane list`, `herdr agent list`,
 `herdr agent get <name>`, `herdr agent read <name>`.
 
+## Command calls
+
+Run a process instead of an agent — a test suite, a build, a long `sleep` — with
+no model, no session, zero tokens:
+
+```typescript
+subagent({ name: "tests", command: ["npm", "test"], timeoutMs: 600_000 });
+subagent({ name: "lint", command: "npm run lint && npm run typecheck" });
+```
+
+An array runs that program (argv, no shell syntax); a string runs through
+`/bin/sh`. Output goes to `artifacts/<session>/subagent-output/<name>.log` and
+the result is its last 6 000 characters. A command has no session, so it cannot
+be resumed or steered.
+
+## Timeouts
+
+Unset by default (wait forever). Set `timeoutMs` per spawn, or `timeout: 15m`
+in agent frontmatter (`90s`/`30m`/`2h`; a bare number is milliseconds). On
+timeout the pane is closed and the phase is `timeout`, not a crash. Waiting on
+a question does not count against the budget.
+
+## Model fallbacks
+
+```markdown
+model: openrouter/z-ai/glm-5.3-flash
+models: openrouter/z-ai/glm-5.3-flash, openrouter/anthropic/claude-haiku-4.5
+```
+
+Retried on the next model only for provider errors another model can fix (usage
+limit, quota, overload, 429). Billing failures fail at once, an ordinary crash
+is never retried, and the failover continues the **same child session** so
+landed work is not redone. One failover per run.
+
+## Writer conflicts
+
+A spawn that may `edit`/`write` is recorded as a writer of its worktree; if
+another live subagent of this session already writes there, the acknowledgement
+says so. A warning, not a lock — parallel workers in one checkout are the point.
+Other pi sessions in the same worktree are not compared.
+
+## Surviving a restart
+
+The registry is a durable record: every spawn writes its pane, agent, model,
+task and start time before the pane command is sent, and every phase change and
+exit updates it. After the parent quits or is killed, the next session on that
+session file reads the rows back:
+
+- **still running** → its pane is adopted, the widget row returns, and its
+  result is still delivered;
+- **finished while nobody listened** → the stored result is replayed once;
+- **unknown** (pane gone, no result) → reported as unknown, never guessed and
+  never re-run.
+
+A session that ends stops its subagents (no unattended spending) and leaves them
+unreported, so the next session says what was interrupted. Resume one by name
+with `subagent_message({ name })`.
+
 ## Requirements
 
 - Pi running inside Herdr (`HERDR_ENV=1`)
 - Extension auto-discovers from `~/.pi/agent/extensions/pi-swarm/`
+- `npm test` runs the reconcile/registry tests (Node ≥ 22.19, no build step)
 
 ## Reference
 
