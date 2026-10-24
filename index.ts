@@ -12,6 +12,7 @@ import {
   mkdirSync,
   copyFileSync,
   unlinkSync,
+  renameSync,
 } from "node:fs";
 import { homedir } from "node:os";
 import {
@@ -32,6 +33,7 @@ import {
   formatReconcileNotice,
   planHasNews,
   planReconcile,
+  reconcileReportPatches,
   type ReconcileEntry,
 } from "./reconcile.ts";
 
@@ -651,7 +653,10 @@ function recordFinish(
 ): void {
   let resultFile: string | undefined;
   if (outcome.summary !== undefined) {
-    resultFile = writeSubagentResult(running.sessionFile, outcome.summary);
+    // A command call has no session file: never fall back to a bare
+    // ".result.txt" in the process cwd, which would be shared by every call.
+    const base = running.sessionFile || running.outputFile;
+    if (base) resultFile = writeSubagentResult(base, outcome.summary);
   }
   updateNameRegistry(running.artifactDir, running.name, {
     phase: outcome.phase,
@@ -662,12 +667,14 @@ function recordFinish(
   });
 }
 
-/** Write a finished subagent's final text beside its session file. */
+/** Write a finished subagent's final text beside its session (or output) file. */
 function writeSubagentResult(sessionFile: string, summary: string): string | undefined {
   try {
     const resultFile = `${sessionFile}.result.txt`;
     mkdirSync(dirname(resultFile), { recursive: true });
-    writeFileSync(resultFile, summary, "utf8");
+    const tmp = `${resultFile}.tmp-${process.pid}-${Math.random().toString(16).slice(2, 8)}`;
+    writeFileSync(tmp, summary, "utf8");
+    renameSync(tmp, resultFile);
     return resultFile;
   } catch {
     return undefined;
@@ -1590,27 +1597,17 @@ async function launchSubagent(
   applySandboxToParts(parts, loadout, { artifactDir, name: params.name });
 
   // Build env prefix: subagent identity + config dir propagation + spawn allowlist
-  const envParts: string[] = [];
-
-  if (resolvedAgentDir) {
-    envParts.push(`PI_CODING_AGENT_DIR=${shellEscape(resolvedAgentDir)}`);
-  }
-
-  if (grantSpawning && agentDefs?.subagentAgents) {
-    envParts.push(`PI_SUBAGENT_ALLOWED=${shellEscape(agentDefs.subagentAgents.join(","))}`);
-  }
-  envParts.push(`PI_SUBAGENT_NAME=${shellEscape(params.name)}`);
-  if (params.agent) {
-    envParts.push(`PI_SUBAGENT_AGENT=${shellEscape(params.agent)}`);
-  }
-  if (agentDefs?.autoExit) {
-    envParts.push(`PI_SUBAGENT_AUTO_EXIT=1`);
-  }
-  envParts.push(`PI_SUBAGENT_SESSION=${shellEscape(subagentSessionFile)}`);
-  envParts.push(`PI_SUBAGENT_ID=${shellEscape(id)}`);
-  envParts.push(`PI_SUBAGENT_ACTIVITY_FILE=${shellEscape(activityFile)}`);
-  envParts.push(`PI_SUBAGENT_SURFACE=${shellEscape(surface)}`);
-  const envPrefix = envParts.join(" ") + " ";
+  const envPrefix = buildChildEnv({
+    agentDir: resolvedAgentDir,
+    agent: params.agent ?? null,
+    name: params.name,
+    sessionFile: subagentSessionFile,
+    id,
+    activityFile,
+    surface,
+    spawnable: grantSpawning ? (agentDefs?.subagentAgents ?? null) : null,
+    autoExit: agentDefs?.autoExit ?? false,
+  });
 
   // Pass task and skill prompts to the sub-agent.
   // Only full-context fork mode gets a direct task argument because it already
@@ -1694,12 +1691,8 @@ async function launchSubagent(
   return running;
 }
 
-/**
- * Launch a command call: a process in its own pane. No model, no provider slot,
- * no session, no tokens — the right shape for a test suite, a build, or a long
- * wait. stdout/stderr are redirected to a file so the result is the command's
- * own output rather than whatever the terminal kept on screen.
- */
+/** Run a process in its own pane: no model, no session, no tokens. Output goes to
+ *  a file, so the result is the command's own output, not screen scrape. */
 async function launchCommand(
   params: Static<typeof SubagentParams>,
   ctx: {
@@ -1736,11 +1729,10 @@ async function launchCommand(
   sendLongCommand(
     surface,
     [
-      `cd ${shellEscape(cwd)}`,
+      // A failed cd must not let the command run in the pane's own directory.
+      `cd ${shellEscape(cwd)} || { printf 'cd %s failed\\n' ${shellEscape(cwd)} > ${shellEscape(outputFile)}; printf '%s\\n' 1 > ${shellEscape(exitFile)}; echo "__SUBAGENT_DONE_1__"; exit 1; }`,
       `(${execLine}) > ${shellEscape(outputFile)} 2>&1`,
       `code=$?`,
-      // The exit code goes to a file as well as the screen: the pane may not
-      // outlive the command, but the outcome must not be lost with it.
       `printf '%s\\n' "$code" > ${shellEscape(exitFile)}`,
       `echo "__SUBAGENT_DONE_${'${code}'}__"`,
     ].join("\n"),
@@ -1780,6 +1772,38 @@ async function launchCommand(
   return running;
 }
 
+/**
+ * The environment every pi child needs: identity, config dir, spawn allowlist,
+ * auto-exit and its own activity file. Shared by spawn and failover relaunch so
+ * the two cannot drift (a relaunch without it runs in the wrong tree, loses the
+ * spawn allowlist and never auto-exits).
+ */
+function buildChildEnv(opts: {
+  agentDir?: string | null;
+  agent?: string | null;
+  name: string;
+  sessionFile: string;
+  id: string;
+  activityFile?: string;
+  surface: string;
+  spawnable?: string[] | null;
+  autoExit?: boolean;
+}): string {
+  const parts: string[] = [];
+  if (opts.agentDir) parts.push(`PI_CODING_AGENT_DIR=${shellEscape(opts.agentDir)}`);
+  if (opts.spawnable && opts.spawnable.length > 0) {
+    parts.push(`PI_SUBAGENT_ALLOWED=${shellEscape(opts.spawnable.join(","))}`);
+  }
+  parts.push(`PI_SUBAGENT_NAME=${shellEscape(opts.name)}`);
+  if (opts.agent) parts.push(`PI_SUBAGENT_AGENT=${shellEscape(opts.agent)}`);
+  if (opts.autoExit) parts.push("PI_SUBAGENT_AUTO_EXIT=1");
+  parts.push(`PI_SUBAGENT_SESSION=${shellEscape(opts.sessionFile)}`);
+  parts.push(`PI_SUBAGENT_ID=${shellEscape(opts.id)}`);
+  if (opts.activityFile) parts.push(`PI_SUBAGENT_ACTIVITY_FILE=${shellEscape(opts.activityFile)}`);
+  parts.push(`PI_SUBAGENT_SURFACE=${shellEscape(opts.surface)}`);
+  return parts.join(" ") + " ";
+}
+
 /** Lowercase, hyphenated, filesystem-safe label. */
 function slugify(value: string): string {
   return (
@@ -1798,15 +1822,8 @@ function commandLabel(command: string | string[]): string {
   return slugify(first.replace(/\/$/, "")) || "command";
 }
 
-/**
- * Warning (never a block) when another live subagent may write in the same
- * worktree. Parallel workers in one checkout are a deliberate part of this
- * extension, so the collision is surfaced, not prevented: the spawn still
- * happens and the caller decides whether to keep the files disjoint.
- *
- * Limitation: only this session's registry is visible, so a second pi session
- * in the same worktree is not detected.
- */
+/** Warn (never block) when another live subagent may write in the same worktree.
+ *  Only this session's registry is visible. */
 function writerConflictWarning(artifactDir: string, running: RunningSubagent): string | null {
   if (!running.writes) return null;
   const peers = listNameRegistry(artifactDir).filter(
@@ -1824,10 +1841,8 @@ function writerConflictWarning(artifactDir: string, running: RunningSubagent): s
   );
 }
 
-/**
- * A command call's output, tail-first: the end of a build or test log is where
- * the failure is, and the whole log does not belong in a context window.
- */
+/** Tail of a command's output: the failure is at the end, and the whole log does
+ *  not belong in a context window. */
 function readCommandOutput(outputFile: string | undefined, limit = 6000): string {
   if (!outputFile) return "(no output)";
   try {
@@ -1837,7 +1852,7 @@ function readCommandOutput(outputFile: string | undefined, limit = 6000): string
     if (trimmed.length <= limit) return trimmed;
     return `[… ${trimmed.length - limit} earlier characters omitted]\n${trimmed.slice(-limit)}`;
   } catch {
-    return "(output file missing — the pane was closed before the command finished)";
+    return "(no output captured — the command wrote nothing, or its pane went away first)";
   }
 }
 
@@ -1948,7 +1963,16 @@ async function watchSubagent(
       recordFinish(running, { phase: "timeout", exitCode: -1, summary });
       closeSurface(surface);
       runningSubagents.delete(running.id);
-      return { name, task, summary, sessionFile, exitCode: -1, elapsed, error: "timeout" };
+      return {
+        name,
+        task,
+        summary,
+        sessionFile,
+        ...(running.command ? { command: running.command } : {}),
+        exitCode: -1,
+        elapsed,
+        error: "timeout",
+      };
     }
 
     if (result.reason === "gone") {
@@ -2133,11 +2157,8 @@ function readResultText(resultFile: string | undefined, limit = 4000): string | 
   }
 }
 
-/**
- * Continue a run that died on a provider error on another model: same child
- * session, same task, new pane. Continuing instead of re-spawning is what keeps
- * a failover from redoing work that already completed and landed.
- */
+/** Continue a failed run on another model: same child session, same task, new
+ *  pane — so a failover does not redo work that already landed. */
 async function relaunchForFailover(
   running: RunningSubagent,
   model: string,
@@ -2152,7 +2173,6 @@ async function relaunchForFailover(
   const parts: string[] = ["pi", "--session", shellEscape(running.sessionFile)];
   parts.push("-e", shellEscape(join(SUBAGENTS_DIR, "subagent-done.ts")));
   applySandboxToParts(parts, { ...loadout, model }, { artifactDir: running.artifactDir, name: running.name });
-
   const noteFile = join(
     running.artifactDir,
     "subagent-resume",
@@ -2179,7 +2199,21 @@ async function relaunchForFailover(
     "subagent-scripts",
     `${slugify(running.name)}-failover-${Date.now()}.sh`,
   );
-  sendLongCommand(surface, `${parts.join(" ")}; echo '__SUBAGENT_DONE_'$?'__'`, {
+  // Same env and cwd as the original spawn: a relaunch that skipped them would
+  // run in the parent's directory and lose the spawn allowlist and auto-exit.
+  const envPrefix = buildChildEnv({
+    agentDir: loadout.agentDir,
+    agent: loadout.agent,
+    name: running.name,
+    sessionFile: running.sessionFile,
+    id: running.id,
+    activityFile: running.activityFile,
+    surface,
+    spawnable: loadout.spawnable,
+    autoExit: true,
+  });
+  const cdPrefix = loadout.cwd ? `cd ${shellEscape(loadout.cwd)} && ` : "";
+  sendLongCommand(surface, `${cdPrefix}${envPrefix}${parts.join(" ")}; echo '__SUBAGENT_DONE_'$?'__'`, {
     scriptPath: launchScriptFile,
     scriptPreamble: `# Failover relaunch of ${running.name} on ${model}`,
   });
@@ -2187,7 +2221,6 @@ async function relaunchForFailover(
   const restartedAt = Date.now();
   const resumed: RunningSubagent = {
     ...running,
-    id: `${running.id}-f${(running.failovers ?? 0) + 1}`,
     surface,
     startTime: restartedAt,
     model,
@@ -2201,12 +2234,8 @@ async function relaunchForFailover(
   return resumed;
 }
 
-/**
- * Watch a run to the end, moving it to the next fallback model when it dies on
- * a provider error that another model can actually fix (usage limits, quota,
- * overload). One failover per run by default — a fallback is not a retry loop —
- * and never for billing failures.
- */
+/** Watch to the end, moving to the next fallback model on a provider error
+ *  another model can fix. One per run; never for billing failures. */
 async function watchWithFailover(
   running: RunningSubagent,
   signal: AbortSignal,
@@ -2215,7 +2244,11 @@ async function watchWithFailover(
 
   for (;;) {
     const result = await watchSubagent(current, signal);
-    if (current.stoppedBySessionExit) return result;
+    if (current.stoppedBySessionExit) {
+      // Callers hold the original object, not this generation of it.
+      running.stoppedBySessionExit = true;
+      return result;
+    }
 
     const nextModel = decideFailover({
       errorMessage: result.errorMessage,
@@ -2238,13 +2271,8 @@ async function watchWithFailover(
   }
 }
 
-/**
- * A fresh parent has no in-memory view of what it spawned before it quit or
- * crashed. Herdr still owns the panes, so read the registry back and, per
- * entry: adopt panes that are still alive, replay outcomes that finished while
- * nobody was listening, and flag everything else as unknown — never guess, and
- * never re-run work whose outcome is unknown.
- */
+/** Read the registry back after a restart: adopt live panes, replay undelivered
+ *  outcomes, flag the rest unknown. Never guess and never re-run. */
 async function reconcileSubagents(pi: ExtensionAPI, ctx: ExtensionContext): Promise<void> {
   try {
     if (!isMuxAvailable()) return;
@@ -2376,8 +2404,8 @@ async function reconcileSubagents(pi: ExtensionAPI, ctx: ExtensionContext): Prom
     );
 
     const now = Date.now();
-    for (const entry of [...plan.report, ...plan.unknown]) {
-      updateNameRegistry(artifactDir, entry.name, { reportedAt: now });
+    for (const { name, patch } of reconcileReportPatches(plan, now)) {
+      updateNameRegistry(artifactDir, name, patch);
     }
   } catch {
     // Reconcile is best-effort: a failure here must never block a session start.

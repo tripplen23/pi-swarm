@@ -1,19 +1,6 @@
 /**
- * Bookkeeping for subagents whose parent pi session went away.
- *
- * Herdr owns the panes, so a subagent keeps running when the parent exits or
- * crashes. What is lost is the parent's in-memory view of it: the widget, the
- * poll loop, and the delivery of a result nobody was there to receive. The name
- * registry (session.ts) is the durable record — written at spawn before the
- * pane command is sent, merged on every phase change and at exit — so a fresh
- * parent can read it back and decide per entry what to do.
- *
- * The decision is deliberately conservative. A pane that still exists is
- * adopted and watched again. A finished entry whose outcome was never delivered
- * is replayed. Everything else is `unknown`: never guessed, never re-run,
- * because a repeated effect is worse than a missing one.
- *
- * Everything here is pure so it can be tested without herdr, panes, or pi.
+ * Restart bookkeeping for subagents: classify each registry row as adopt, report,
+ * unknown or idle. Pure, so it is testable without herdr, panes or pi.
  */
 
 export type SubagentPhase =
@@ -209,6 +196,26 @@ export function decideFailover(options: {
 }
 
 /** True when the plan has anything worth waking the session for. */
+
+/** Registry patches that close out a reconcile pass.
+ *
+ * Unknown rows also lose their stale running/asking phase: otherwise they still
+ * look live to classifyEntry and to writer warnings on every later start, and
+ * the same notice repeats forever.
+ */
+export function reconcileReportPatches(
+  plan: ReconcilePlan,
+  now = Date.now(),
+): { name: string; patch: { reportedAt: number; phase?: SubagentPhase } }[] {
+  return [
+    ...plan.report.map((entry) => ({ name: entry.name, patch: { reportedAt: now } })),
+    ...plan.unknown.map((entry) => ({
+      name: entry.name,
+      patch: { reportedAt: now, phase: "unknown" as const },
+    })),
+  ];
+}
+
 export function planHasNews(plan: ReconcilePlan): boolean {
   return (
     plan.adopt.length > 0 ||

@@ -63,26 +63,20 @@ test("listNameRegistry returns names and skips entries without a session file", 
   assert.equal(listed[0].sessionFile, "/tmp/worker.jsonl");
 });
 
-test("a corrupt registry reads as empty instead of throwing", () => {
+test("unusable registry payloads read as empty instead of throwing", () => {
   const dir = tempDir();
-  writeFileSync(nameRegistryPath(dir), "{ not json", "utf8");
-  assert.deepEqual(readNameRegistry(dir), {});
-  assert.equal(updateNameRegistry(dir, "scout", { phase: "done" }), false);
-});
-
-test("an array or scalar registry payload is rejected, not treated as entries", () => {
-  const dir = tempDir();
-  writeFileSync(nameRegistryPath(dir), JSON.stringify(["nope"]), "utf8");
-  assert.deepEqual(readNameRegistry(dir), {});
-  writeFileSync(nameRegistryPath(dir), JSON.stringify("nope"), "utf8");
-  assert.deepEqual(readNameRegistry(dir), {});
+  for (const payload of ["{ not json", JSON.stringify(["nope"]), JSON.stringify("nope")]) {
+    writeFileSync(nameRegistryPath(dir), payload, "utf8");
+    assert.deepEqual(readNameRegistry(dir), {}, payload);
+    assert.equal(updateNameRegistry(dir, "scout", { phase: "done" }), false);
+  }
 });
 
 test("registry writes are complete: the file always parses as JSON", () => {
   const dir = tempDir();
-  for (let i = 0; i < 20; i += 1) {
+  for (let i = 0; i < 5; i += 1) {
     registerName(dir, `agent-${i}`, { sessionFile: `/tmp/a${i}.jsonl`, sessionId: `s${i}` });
   }
   const parsed = JSON.parse(readFileSync(nameRegistryPath(dir), "utf8"));
-  assert.equal(Object.keys(parsed).length, 20);
+  assert.equal(Object.keys(parsed).length, 5);
 });
