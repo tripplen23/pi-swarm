@@ -176,6 +176,18 @@ export function readScreen(surface: string, lines = 50): string {
 }
 
 /**
+ * Every pane herdr still owns, as pane id + title. A new parent session uses
+ * this to adopt subagents whose panes outlived the process that spawned them.
+ */
+export function listPanes(): { paneId: string; title: string }[] {
+  requireHerdr();
+  const panes: any[] = herdrJson(["pane", "list"])?.result?.panes ?? [];
+  return panes
+    .filter((p) => typeof p?.pane_id === "string")
+    .map((p) => ({ paneId: p.pane_id, title: typeof p.terminal_title === "string" ? p.terminal_title : "" }));
+}
+
+/**
  * Read the screen contents of a pane (async).
  */
 export async function readScreenAsync(surface: string, lines = 50): Promise<string> {
@@ -204,8 +216,12 @@ export function closeSurface(surface: string): void {
 
 export interface PollResult {
   /** How the subagent exited */
-  reason: "done" | "sentinel" | "error";
-  /** Shell exit code (from sentinel). 0 for file-based exits. */
+  reason: "done" | "sentinel" | "error" | "timeout" | "gone";
+  /**
+   * Shell exit code. `-1` when there is no code to report: a deadline ran out
+   * (`timeout`) or the pane vanished (`gone`). Both are only reachable under the
+   * conditions documented on those reasons below.
+   */
   exitCode: number;
   /** Error message if reason is "error" (auto-retry exhausted, provider overload, etc.) */
   errorMessage?: string;
@@ -242,13 +258,29 @@ export async function pollForExit(
     sessionFile?: string;
     sentinelFile?: string;
     onTick?: (elapsed: number) => void;
+    timeoutMs?: number;
+    getDeadlineAt?: () => number;
+    exitFile?: string;
   },
 ): Promise<PollResult> {
   const start = Date.now();
+  let readFailures = 0;
 
   for (;;) {
     if (signal.aborted) {
       throw new Error("Aborted while waiting for subagent to finish");
+    }
+
+    if (options.exitFile) {
+      try {
+        const code = Number.parseInt(readFileSync(options.exitFile, "utf8").trim(), 10);
+        if (Number.isFinite(code)) return { reason: "sentinel", exitCode: code };
+      } catch {}
+    }
+
+    const deadlineAt = options.getDeadlineAt?.() ?? (options.timeoutMs ? start + options.timeoutMs : null);
+    if (deadlineAt !== null && Date.now() > deadlineAt) {
+      return { reason: "timeout", exitCode: -1 };
     }
 
     // Fast path: check for .exit sidecar file (written by the error path)
@@ -275,6 +307,7 @@ export async function pollForExit(
     // Slow path: read terminal screen for sentinel (crash detection)
     try {
       const screen = await readScreenAsync(surface, 8);
+      readFailures = 0;
       const match = screen.match(/__SUBAGENT_DONE_(\d+)__/);
       if (match) {
         return { reason: "sentinel", exitCode: parseInt(match[1], 10) };
@@ -290,6 +323,21 @@ export async function pollForExit(
             return interpretExitSidecar(data);
           }
         } catch {}
+      }
+
+      // A pane that is really gone must not be polled forever: an unreadable
+      // screen is not a running subagent, so report the outcome as unknown
+      // instead of hanging on it (this is what a manually closed pane looks like).
+      readFailures += 1;
+      if (readFailures >= 3) {
+        let stillThere = true;
+        try {
+          stillThere = listPanes().some((pane) => pane.paneId === surface);
+        } catch {
+          // herdr unreachable: assume the pane is still there and keep trying.
+        }
+        if (!stillThere) return { reason: "gone", exitCode: -1 };
+        readFailures = 0;
       }
     }
 

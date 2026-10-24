@@ -15,6 +15,8 @@ import {
 import { randomBytes, randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 
+import type { SubagentPhase } from "./reconcile.ts";
+
 export interface SessionEntry {
   type: string;
   id: string;
@@ -108,6 +110,9 @@ export interface SubagentLoadout {
   identity: string | null;
   /** Agents this subagent was allowed to spawn (for PI_SUBAGENT_ALLOWED). */
   spawnable: string[] | null;
+  /** Wall-clock budget replayed on resume, or null for none. Optional so
+   *  snapshots written before timeouts existed still load. */
+  timeoutMs?: number | null;
   /** Whether the agent auto-exits (informational; resume forces autonomous). */
   autoExit: boolean;
   /** Working directory the subagent ran in, or null. */
@@ -158,6 +163,37 @@ export interface NameRegistryEntry {
   sessionFile: string;
   /** Canonical session header id (kept for display/lineage). */
   sessionId: string | null;
+  /**
+   * Durable bookkeeping for a parent that comes back after quitting or
+   * crashing. Written at spawn (before the pane command is sent) and merged on
+   * every phase change and at exit. Read back by reconcile.ts on session start;
+   * see that file for the semantics of each field.
+   */
+  phase?: SubagentPhase;
+  /** Herdr pane id, so a surviving pane can be adopted by a new parent. */
+  surface?: string;
+  agent?: string | null;
+  model?: string | null;
+  cli?: string;
+  sentinelFile?: string;
+  /** Command line of a command call (no model, no session file). */
+  command?: string;
+  outputFile?: string;
+  /** Durable exit-code file of a command call. */
+  exitFile?: string;
+  /** Whether this subagent may write in its worktree. */
+  writes?: boolean;
+  task?: string;
+  cwd?: string | null;
+  startedAt?: number;
+  updatedAt?: number;
+  finishedAt?: number;
+  exitCode?: number;
+  /** File holding the final summary text (too long to keep in the registry). */
+  resultFile?: string;
+  /** Set once the parent delivered this entry's outcome; never delivered twice. */
+  reportedAt?: number;
+  interactive?: boolean;
 }
 
 export type NameRegistry = Record<string, NameRegistryEntry>;
@@ -181,7 +217,9 @@ export function readNameRegistry(artifactDir: string): NameRegistry {
 }
 
 /**
- * Register (or overwrite) a name → session mapping for a spawner session.
+ * Register (or merge) a name → session mapping for a spawner session.
+ * Existing bookkeeping fields survive the merge, so the spawn-time row and the
+ * later phase updates can be written by different call sites in any order.
  * Writes atomically (temp file + rename) so a concurrent reader never sees a
  * partial registry.
  */
@@ -190,17 +228,63 @@ export function registerName(
   name: string,
   entry: NameRegistryEntry,
 ): void {
+  writeRegistry(artifactDir, (registry) => {
+    registry[name] = { ...registry[name], ...entry };
+  });
+}
+
+/**
+ * Merge fields into an existing registry entry. Returns false when the name is
+ * not registered (a phase update for an unknown name is a bug, not a row to
+ * invent). Never throws.
+ */
+export function updateNameRegistry(
+  artifactDir: string,
+  name: string,
+  patch: Partial<NameRegistryEntry>,
+): boolean {
+  let found = false;
+  writeRegistry(artifactDir, (registry) => {
+    const entry = registry[name];
+    if (!entry) return;
+    registry[name] = { ...entry, ...patch };
+    found = true;
+  });
+  return found;
+}
+
+/**
+ * Every registered subagent of a spawner session, in registration order, for
+ * the restart reconcile pass. Corrupt entries are skipped rather than guessed at.
+ */
+export function listNameRegistry(
+  artifactDir: string,
+): (NameRegistryEntry & { name: string })[] {
+  const registry = readNameRegistry(artifactDir);
+  const out: (NameRegistryEntry & { name: string })[] = [];
+  for (const [name, entry] of Object.entries(registry)) {
+    if (entry && typeof entry.sessionFile === "string") out.push({ ...entry, name });
+  }
+  return out;
+}
+
+/** Atomic read-modify-write of the registry file. Best-effort throughout: none
+ * of this bookkeeping may ever break a spawn or a resume. */
+function writeRegistry(
+  artifactDir: string,
+  mutate: (registry: NameRegistry) => void,
+): void {
   try {
     mkdirSync(artifactDir, { recursive: true });
     const registry = readNameRegistry(artifactDir);
-    registry[name] = entry;
+    mutate(registry);
     const p = nameRegistryPath(artifactDir);
     const tmp = `${p}.tmp-${process.pid}-${Math.random().toString(16).slice(2, 8)}`;
     writeFileSync(tmp, JSON.stringify(registry, null, 2), "utf8");
     renameSync(tmp, p);
   } catch {
-    // Best-effort: a failed registration only means resume-by-name won't find
-    // this subagent later; it never breaks the spawn itself.
+    // A failed write only means the outcome cannot be reconciled after a
+    // restart; it never breaks the session that is running right now.
   }
 }
 
