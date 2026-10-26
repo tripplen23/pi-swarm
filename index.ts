@@ -22,6 +22,7 @@ import {
   sendCommand,
   sendLongCommand,
   pollForExit,
+  paneHasLiveChild,
   closeSurface,
   shellEscape,
   readScreen,
@@ -752,6 +753,11 @@ function resolveResultPresentation(
     return `${subject} lost its pane while running — outcome unknown.\n\n${result.summary}`;
   }
 
+  if (result.error === "exited") {
+    const subject = result.command ? `Command \`${result.command}\`` : `Sub-agent "${name}"`;
+    return `${subject} exited and its pane returned to a shell prompt before the exit code was read — outcome unknown.\n\n${result.summary}${subject.startsWith("Sub-agent") ? sessionRef : ""}`;
+  }
+
   if (result.command) {
     // A command has no session to follow up into; its output is the result.
     return result.exitCode !== 0
@@ -1218,12 +1224,11 @@ function steerSubagent(
   running: RunningSubagent,
   message: string,
   send: (surface: string, command: string) => void = sendCommand,
-): { ok: true } | { error: string } {
+): { ok: true } | { dead: true } | { error: string } {
   const flattened = message.replace(/\s*\n\s*/g, " ").trim();
+  if (paneHasLiveChild(running.surface) === false) return { dead: true };
   try {
     send(running.surface, flattened);
-    // The answer is on its way: it is working again, and its timeout budget
-    // resumes counting from here.
     recordPhase(running, "running");
     if (running.timeoutMs) running.deadlineAt = Date.now() + running.timeoutMs;
     return { ok: true };
@@ -1259,6 +1264,17 @@ function handleSubagentSteer(
   observeRunningSubagent(running, now);
 
   const steer = steerSubagent(running, message, send);
+  if ("dead" in steer) {
+    // Nothing was sent. Drop the stale run so the caller's next message resumes
+    // the session instead of steering a pane that no longer holds an agent.
+    runningSubagents.delete(running.id);
+    updateWidget();
+    const err =
+      `Subagent "${running.name}" had already exited: its pane is back at a shell prompt, so the ` +
+      `message was NOT sent (it would have run as shell commands). The run has been cleared from ` +
+      `the running list — send the message again to resume the session.`;
+    return { content: [{ type: "text" as const, text: err }], details: { error: err, id: running.id, name: running.name } };
+  }
   if ("error" in steer) {
     return {
       content: [{ type: "text" as const, text: steer.error }],
@@ -1995,6 +2011,28 @@ async function watchSubagent(
         exitCode: -1,
         elapsed,
         error: "gone",
+      };
+    }
+
+    if (result.reason === "exited") {
+      const what = running.cli === "command" ? `Command ${running.command}` : `Sub-agent "${name}"`;
+      const partial =
+        running.cli === "command" ? `\n\n${readCommandOutput(running.outputFile)}` : "";
+      const summary =
+        `${what} exited and the pane returned to its shell before the exit code was read, so its ` +
+        `outcome is unknown (no exit code, no result recorded). Check the working tree before ` +
+        `trusting its work.${partial}`;
+      recordFinish(running, { phase: "unknown", exitCode: -1, summary });
+      runningSubagents.delete(running.id);
+      return {
+        name,
+        task,
+        summary,
+        sessionFile,
+        ...(running.command ? { command: running.command } : {}),
+        exitCode: -1,
+        elapsed,
+        error: "exited",
       };
     }
 
@@ -2903,10 +2941,17 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         }
 
         // ── Steer a running subagent ──
-        // A name that matches a currently-running subagent always steers it.
+        // A name that matches a currently-running subagent always steers it —
+        // unless its pane is back at a shell prompt, which means the run ended
+        // without its exit being read (a finished subagent, and the sentinel has
+        // long scrolled away). Forget that run and fall through to resume below.
         const runningMatch = Array.from(runningSubagents.values()).find((r) => r.name === requestedName);
-        if (runningMatch) {
+        if (runningMatch && paneHasLiveChild(runningMatch.surface) !== false) {
           return handleSubagentSteer({ name: requestedName, message: params.message });
+        }
+        if (runningMatch) {
+          runningSubagents.delete(runningMatch.id);
+          updateWidget();
         }
 
         // ── Resume a finished session by name ──
@@ -2950,10 +2995,16 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         // Guard: never resume a session that is still running — two processes
         // mutating the same .jsonl corrupts it. Steer it by name instead.
         for (const r of runningSubagents.values()) {
-          if (resolve(r.sessionFile) === resolve(sessionPath)) {
-            const err = `Subagent "${requestedName}" is still running as "${r.name}". Your message will steer it; resending as a steer.`;
-            return handleSubagentSteer({ name: r.name, message: params.message });
+          if (resolve(r.sessionFile) !== resolve(sessionPath)) continue;
+          // A stale entry whose pane is back at a shell prompt owns no process,
+          // so it cannot corrupt the transcript: forget it and resume below.
+          if (paneHasLiveChild(r.surface) === false) {
+            runningSubagents.delete(r.id);
+            updateWidget();
+            break;
           }
+          const err = `Subagent "${requestedName}" is still running as "${r.name}". Your message will steer it; resending as a steer.`;
+          return handleSubagentSteer({ name: r.name, message: params.message });
         }
 
         // Reconstruct the sandbox from the snapshot written at spawn time.
