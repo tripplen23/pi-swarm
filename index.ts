@@ -41,7 +41,6 @@ import {
 
 import {
   countSessionEntryLines,
-  findLastAssistantMessage,
   getNewEntries,
   getSessionId,
   findLastAssistantReply,
@@ -2037,7 +2036,7 @@ async function watchSubagent(
         partialOutput: running.cli === "command" ? readCommandOutput(running.outputFile) : null,
       });
       const stats =
-        outcome.phase === "done" && existsSync(sessionFile) ? summarizeSessionStats(sessionFile) : null;
+        outcome.phase !== "unknown" && existsSync(sessionFile) ? summarizeSessionStats(sessionFile) : null;
 
       recordFinish(running, { phase: outcome.phase, exitCode: -1, summary: outcome.summary });
       closeSurface(surface);
@@ -2120,7 +2119,7 @@ async function watchSubagent(
     if (existsSync(sessionFile)) {
       const allEntries = getNewEntries(sessionFile, 0);
       summary =
-        findLastAssistantMessage(allEntries) ??
+        findLastAssistantReply(allEntries)?.text ??
         (result.errorMessage
           ? `Subagent error: ${result.errorMessage}`
           : result.exitCode !== 0
@@ -3173,7 +3172,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
             if (running.stoppedBySessionExit) return;
 
             const allEntries = getNewEntries(sessionPath, entryCountBefore);
-            const summary = findLastAssistantMessage(allEntries) ??
+            const summary = findLastAssistantReply(allEntries)?.text ??
               (result.errorMessage
                 ? `Subagent error: ${result.errorMessage}`
                 : result.exitCode !== 0

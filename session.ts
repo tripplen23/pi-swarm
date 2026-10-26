@@ -585,7 +585,7 @@ export interface LastAssistantReply {
   isError: boolean;
 }
 
-/** Like findLastAssistantMessage, but keeps error turns distinguishable. */
+/** The last assistant reply, with whether that turn ended in an error. */
 export function findLastAssistantReply(entries: SessionEntry[]): LastAssistantReply | null {
   for (let i = entries.length - 1; i >= 0; i--) {
     const entry = entries[i];
@@ -599,27 +599,29 @@ export function findLastAssistantReply(entries: SessionEntry[]): LastAssistantRe
           block.type === "text" && typeof block.text === "string" && block.text.trim() !== "",
       )
       .map((block) => block.text as string);
-
-    if (texts.length > 0 && texts.join("").trim()) {
-      return { text: texts.join("\n"), isError: false };
-    }
+    const text = texts.join("\n");
 
     const stopReason = (msg.message as { stopReason?: unknown }).stopReason;
     const errorMessage = (msg.message as { errorMessage?: unknown }).errorMessage;
-    if (
-      stopReason === "error" &&
-      typeof errorMessage === "string" &&
-      errorMessage.trim() !== ""
-    ) {
-      return { text: `Subagent error: ${errorMessage.trim()}`, isError: true };
+    const errorText =
+      typeof errorMessage === "string" && errorMessage.trim() !== ""
+        ? `Subagent error: ${errorMessage.trim()}`
+        : "";
+
+    // A turn can stream part of an answer and then fail. Keep that text — the
+    // normal path shows it as the result — and flag the turn as errored, so the
+    // `exited` path records `error` instead of `done`.
+    if (stopReason === "error") {
+      const recovered = text.trim() ? text : errorText;
+      if (recovered) return { text: recovered, isError: true };
+      continue;
     }
+
+    if (text.trim()) return { text, isError: false };
   }
   return null;
 }
 
-export function findLastAssistantMessage(entries: SessionEntry[]): string | null {
-  return findLastAssistantReply(entries)?.text ?? null;
-}
 
 
 /**
