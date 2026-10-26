@@ -166,6 +166,20 @@ with `subagent_message({ name })`.
 - Extension auto-discovers from `~/.pi/agent/extensions/pi-swarm/`
 - `npm test` runs the reconcile/registry tests (Node ≥ 22.19, no build step)
 
+## Checks
+
+CI runs `npm run typecheck` and `npm test` on pull requests and on `main`.
+
+Not covered by CI, worth one manual pass after a change to the launch or
+reconcile path:
+
+- spawn a subagent, let it finish → the result arrives on its own;
+- quit pi while one runs → the next session says once what was `stopped`;
+- `kill -9` the parent mid-run → the next session adopts the pane and still
+  delivers the result;
+- clear the child pane after it finished, then reopen → the result comes back
+  with "exit code lost" instead of being lost.
+
 ## Reference
 
 - Herdr CLI: `herdr --skill`
