@@ -188,6 +188,30 @@ export function listPanes(): { paneId: string; title: string }[] {
 }
 
 /**
+ * Whether a pane still runs a child process, or sits idle back at its own shell.
+ *
+ * A subagent whose pi process exited leaves the pane at a `zsh` prompt. Typing a
+ * follow-up there (`pane run`) does not reach an agent: the shell tries to run the
+ * message as commands. `foreground_process_group_id` equal to `shell_pid` is what
+ * that looks like — the foreground group is the shell itself.
+ *
+ * Returns `null` when herdr cannot say, so a caller never treats "unknown" as
+ * "dead" and skips a subagent that is in fact still working.
+ */
+export function paneHasLiveChild(surface: string): boolean | null {
+  requireHerdr();
+  try {
+    const info = herdrJson(["pane", "process-info", "--pane", surface])?.result?.process_info;
+    const groupId = info?.foreground_process_group_id;
+    const shellPid = info?.shell_pid;
+    if (typeof groupId !== "number" || typeof shellPid !== "number") return null;
+    return groupId !== shellPid;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Read the screen contents of a pane (async).
  */
 export async function readScreenAsync(surface: string, lines = 50): Promise<string> {
@@ -216,7 +240,7 @@ export function closeSurface(surface: string): void {
 
 export interface PollResult {
   /** How the subagent exited */
-  reason: "done" | "sentinel" | "error" | "timeout" | "gone";
+  reason: "done" | "sentinel" | "error" | "timeout" | "gone" | "exited";
   /**
    * Shell exit code. `-1` when there is no code to report: a deadline ran out
    * (`timeout`) or the pane vanished (`gone`). Both are only reachable under the
@@ -265,6 +289,7 @@ export async function pollForExit(
 ): Promise<PollResult> {
   const start = Date.now();
   let readFailures = 0;
+  let ticks = 0;
 
   for (;;) {
     if (signal.aborted) {
@@ -304,9 +329,12 @@ export async function pollForExit(
       } catch {}
     }
 
-    // Slow path: read terminal screen for sentinel (crash detection)
+    // Slow path: read terminal screen for sentinel (crash detection). Read
+    // wider than the sentinel needs: a child that exits throws the pane back to
+    // a prompt, and anything the shell prints after it pushes the sentinel up
+    // out of a narrow window, which is a finished subagent reported as running.
     try {
-      const screen = await readScreenAsync(surface, 8);
+      const screen = await readScreenAsync(surface, 40);
       readFailures = 0;
       const match = screen.match(/__SUBAGENT_DONE_(\d+)__/);
       if (match) {
@@ -339,6 +367,15 @@ export async function pollForExit(
         if (!stillThere) return { reason: "gone", exitCode: -1 };
         readFailures = 0;
       }
+    }
+
+    // Last resort: the pane still exists but no child runs in it. Some output
+    // always scrolled the sentinel away, so the exit code is lost but the run is
+    // over — without this, a dead pane is polled until the timeout, and a parent
+    // waiting on it never wakes up. Checked every fifth tick (5 s) because it
+    // costs a herdr call that the screen read above usually makes unnecessary.
+    if (++ticks % 5 === 0 && paneHasLiveChild(surface) === false) {
+      return { reason: "exited", exitCode: -1 };
     }
 
     const elapsed = Math.floor((Date.now() - start) / 1000);

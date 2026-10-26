@@ -22,6 +22,7 @@ import {
   sendCommand,
   sendLongCommand,
   pollForExit,
+  paneHasLiveChild,
   closeSurface,
   shellEscape,
   readScreen,
@@ -30,6 +31,7 @@ import {
 
 import {
   decideFailover,
+  describeExitedRun,
   formatReconcileNotice,
   planHasNews,
   planReconcile,
@@ -39,9 +41,9 @@ import {
 
 import {
   countSessionEntryLines,
-  findLastAssistantMessage,
   getNewEntries,
   getSessionId,
+  findLastAssistantReply,
   listNameRegistry,
   readNameRegistry,
   readSubagentLoadout,
@@ -49,6 +51,7 @@ import {
   type NameRegistryEntry,
   resolveNameInRegistry,
   updateNameRegistry,
+  updateNameRegistryOwned,
   seedSubagentSessionFile,
   summarizeSessionStats,
   writeSubagentLoadout,
@@ -614,6 +617,7 @@ function recordSpawnState(running: RunningSubagent): void {
     startedAt: running.startTime,
     updatedAt: running.startTime,
     interactive: running.interactive,
+    runId: running.id,
     ...(running.timeoutMs ? { timeoutMs: running.timeoutMs } : {}),
     ...(running.cli ? { cli: running.cli } : {}),
     ...(running.sentinelFile ? { sentinelFile: running.sentinelFile } : {}),
@@ -635,7 +639,10 @@ function recordSpawnState(running: RunningSubagent): void {
 
 /** Merge a phase change (asking, running again) into the row. */
 function recordPhase(running: RunningSubagent, phase: ReconcileEntry["phase"]): void {
-  updateNameRegistry(running.artifactDir, running.name, { phase, updatedAt: Date.now() });
+  updateNameRegistryOwned(running.artifactDir, running.name, running.id, {
+    phase,
+    updatedAt: Date.now(),
+  });
 }
 
 /**
@@ -658,7 +665,7 @@ function recordFinish(
     const base = running.sessionFile || running.outputFile;
     if (base) resultFile = writeSubagentResult(base, outcome.summary);
   }
-  updateNameRegistry(running.artifactDir, running.name, {
+  updateNameRegistryOwned(running.artifactDir, running.name, running.id, {
     phase: outcome.phase,
     finishedAt: Date.now(),
     updatedAt: Date.now(),
@@ -683,7 +690,7 @@ function writeSubagentResult(sessionFile: string, summary: string): string | und
 
 /** Mark an outcome delivered, so a later restart does not report it twice. */
 function markReported(running: RunningSubagent): void {
-  updateNameRegistry(running.artifactDir, running.name, { reportedAt: Date.now() });
+  updateNameRegistryOwned(running.artifactDir, running.name, running.id, { reportedAt: Date.now() });
 }
 
 const statusConfig = loadStatusConfig();
@@ -750,6 +757,12 @@ function resolveResultPresentation(
   if (result.error === "gone") {
     const subject = result.command ? `Command \`${result.command}\`` : `Sub-agent "${name}"`;
     return `${subject} lost its pane while running — outcome unknown.\n\n${result.summary}`;
+  }
+
+  if (result.error === "exited") {
+    // The summary already explains the lost exit code and carries whatever was
+    // recovered; a command has no session to follow up into.
+    return `${result.summary}${result.command ? "" : sessionRef}`;
   }
 
   if (result.command) {
@@ -1218,12 +1231,11 @@ function steerSubagent(
   running: RunningSubagent,
   message: string,
   send: (surface: string, command: string) => void = sendCommand,
-): { ok: true } | { error: string } {
+): { ok: true } | { dead: true } | { error: string } {
   const flattened = message.replace(/\s*\n\s*/g, " ").trim();
+  if (paneHasLiveChild(running.surface) === false) return { dead: true };
   try {
     send(running.surface, flattened);
-    // The answer is on its way: it is working again, and its timeout budget
-    // resumes counting from here.
     recordPhase(running, "running");
     if (running.timeoutMs) running.deadlineAt = Date.now() + running.timeoutMs;
     return { ok: true };
@@ -1259,6 +1271,17 @@ function handleSubagentSteer(
   observeRunningSubagent(running, now);
 
   const steer = steerSubagent(running, message, send);
+  if ("dead" in steer) {
+    // Nothing was sent. Drop the stale run so the caller's next message resumes
+    // the session instead of steering a pane that no longer holds an agent.
+    runningSubagents.delete(running.id);
+    updateWidget();
+    const err =
+      `Subagent "${running.name}" had already exited: its pane is back at a shell prompt, so the ` +
+      `message was NOT sent (it would have run as shell commands). The run has been cleared from ` +
+      `the running list — send the message again to resume the session.`;
+    return { content: [{ type: "text" as const, text: err }], details: { error: err, id: running.id, name: running.name } };
+  }
   if ("error" in steer) {
     return {
       content: [{ type: "text" as const, text: steer.error }],
@@ -1998,6 +2021,39 @@ async function watchSubagent(
       };
     }
 
+    if (result.reason === "exited") {
+      // The pane is back at its shell: the exit code is gone, but a finished
+      // agent child still has its last message in its session file.
+      const recovered =
+        running.cli === "command" || !existsSync(sessionFile)
+          ? null
+          : findLastAssistantReply(getNewEntries(sessionFile, 0));
+      const outcome = describeExitedRun({
+        isCommand: running.cli === "command",
+        command: running.command,
+        name,
+        recovered,
+        partialOutput: running.cli === "command" ? readCommandOutput(running.outputFile) : null,
+      });
+      const stats =
+        outcome.phase !== "unknown" && existsSync(sessionFile) ? summarizeSessionStats(sessionFile) : null;
+
+      recordFinish(running, { phase: outcome.phase, exitCode: -1, summary: outcome.summary });
+      closeSurface(surface);
+      runningSubagents.delete(running.id);
+      return {
+        name,
+        task,
+        summary: outcome.summary,
+        sessionFile,
+        ...(running.command ? { command: running.command } : {}),
+        exitCode: -1,
+        elapsed,
+        error: "exited",
+        ...(stats ? { stats } : {}),
+      };
+    }
+
     if (running.cli === "command") {
       const summary = `$ ${running.command}\n\n${readCommandOutput(running.outputFile)}`;
       recordFinish(running, {
@@ -2063,7 +2119,7 @@ async function watchSubagent(
     if (existsSync(sessionFile)) {
       const allEntries = getNewEntries(sessionFile, 0);
       summary =
-        findLastAssistantMessage(allEntries) ??
+        findLastAssistantReply(allEntries)?.text ??
         (result.errorMessage
           ? `Subagent error: ${result.errorMessage}`
           : result.exitCode !== 0
@@ -2337,6 +2393,9 @@ async function reconcileSubagents(pi: ExtensionAPI, ctx: ExtensionContext): Prom
         statusState: createStatusState({ source: entry.cli === "claude" ? "claude" : "pi", startTimeMs: startTime }),
       };
       runningSubagents.set(running.id, running);
+      // Claim the row: the run that owned this name is gone, and only the claim
+      // lets this watcher write its phase and result.
+      recordSpawnState(running);
       const watcherAbort = new AbortController();
       running.abortController = watcherAbort;
       startWidgetRefresh();
@@ -2903,10 +2962,17 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         }
 
         // ── Steer a running subagent ──
-        // A name that matches a currently-running subagent always steers it.
+        // A name that matches a currently-running subagent always steers it —
+        // unless its pane is back at a shell prompt, which means the run ended
+        // without its exit being read (a finished subagent, and the sentinel has
+        // long scrolled away). Forget that run and fall through to resume below.
         const runningMatch = Array.from(runningSubagents.values()).find((r) => r.name === requestedName);
-        if (runningMatch) {
+        if (runningMatch && paneHasLiveChild(runningMatch.surface) !== false) {
           return handleSubagentSteer({ name: requestedName, message: params.message });
+        }
+        if (runningMatch) {
+          runningSubagents.delete(runningMatch.id);
+          updateWidget();
         }
 
         // ── Resume a finished session by name ──
@@ -2950,10 +3016,16 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         // Guard: never resume a session that is still running — two processes
         // mutating the same .jsonl corrupts it. Steer it by name instead.
         for (const r of runningSubagents.values()) {
-          if (resolve(r.sessionFile) === resolve(sessionPath)) {
-            const err = `Subagent "${requestedName}" is still running as "${r.name}". Your message will steer it; resending as a steer.`;
-            return handleSubagentSteer({ name: r.name, message: params.message });
+          if (resolve(r.sessionFile) !== resolve(sessionPath)) continue;
+          // A stale entry whose pane is back at a shell prompt owns no process,
+          // so it cannot corrupt the transcript: forget it and resume below.
+          if (paneHasLiveChild(r.surface) === false) {
+            runningSubagents.delete(r.id);
+            updateWidget();
+            break;
           }
+          const err = `Subagent "${requestedName}" is still running as "${r.name}". Your message will steer it; resending as a steer.`;
+          return handleSubagentSteer({ name: r.name, message: params.message });
         }
 
         // Reconstruct the sandbox from the snapshot written at spawn time.
@@ -3100,7 +3172,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
             if (running.stoppedBySessionExit) return;
 
             const allEntries = getNewEntries(sessionPath, entryCountBefore);
-            const summary = findLastAssistantMessage(allEntries) ??
+            const summary = findLastAssistantReply(allEntries)?.text ??
               (result.errorMessage
                 ? `Subagent error: ${result.errorMessage}`
                 : result.exitCode !== 0

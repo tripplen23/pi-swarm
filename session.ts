@@ -183,6 +183,9 @@ export interface NameRegistryEntry {
   exitFile?: string;
   /** Whether this subagent may write in its worktree. */
   writes?: boolean;
+  /** Owning run. A newer run with the same name replaces it, and writes from
+   *  the old watcher are then ignored instead of clobbering the new row. */
+  runId?: string;
   task?: string;
   cwd?: string | null;
   startedAt?: number;
@@ -251,6 +254,27 @@ export function updateNameRegistry(
     found = true;
   });
   return found;
+}
+
+/**
+ * Merge fields into an entry only while `runId` still owns that name. Two
+ * watchers can share a name (a stale run replaced by a resume), and the losing
+ * one must not mark the winner's row finished or reported.
+ */
+export function updateNameRegistryOwned(
+  artifactDir: string,
+  name: string,
+  runId: string,
+  patch: Partial<NameRegistryEntry>,
+): boolean {
+  let applied = false;
+  writeRegistry(artifactDir, (registry) => {
+    const entry = registry[name];
+    if (!entry || entry.runId !== runId) return;
+    registry[name] = { ...entry, ...patch };
+    applied = true;
+  });
+  return applied;
 }
 
 /**
@@ -555,7 +579,14 @@ export function getNewEntries(sessionFile: string, afterLine: number): SessionEn
  * auto-retry exhausts on a provider overload / rate limit / server error, and
  * without this fallback the parent would silently see a stale earlier message.
  */
-export function findLastAssistantMessage(entries: SessionEntry[]): string | null {
+/** The last assistant reply, with whether it was produced by an errored turn. */
+export interface LastAssistantReply {
+  text: string;
+  isError: boolean;
+}
+
+/** The last assistant reply, with whether that turn ended in an error. */
+export function findLastAssistantReply(entries: SessionEntry[]): LastAssistantReply | null {
   for (let i = entries.length - 1; i >= 0; i--) {
     const entry = entries[i];
     if (entry.type !== "message") continue;
@@ -568,21 +599,30 @@ export function findLastAssistantMessage(entries: SessionEntry[]): string | null
           block.type === "text" && typeof block.text === "string" && block.text.trim() !== "",
       )
       .map((block) => block.text as string);
-
-    if (texts.length > 0 && texts.join("").trim()) return texts.join("\n");
+    const text = texts.join("\n");
 
     const stopReason = (msg.message as { stopReason?: unknown }).stopReason;
     const errorMessage = (msg.message as { errorMessage?: unknown }).errorMessage;
-    if (
-      stopReason === "error" &&
-      typeof errorMessage === "string" &&
-      errorMessage.trim() !== ""
-    ) {
-      return `Subagent error: ${errorMessage.trim()}`;
+    const errorText =
+      typeof errorMessage === "string" && errorMessage.trim() !== ""
+        ? `Subagent error: ${errorMessage.trim()}`
+        : "";
+
+    // A turn can stream part of an answer and then fail. Keep that text — the
+    // normal path shows it as the result — and flag the turn as errored, so the
+    // `exited` path records `error` instead of `done`.
+    if (stopReason === "error") {
+      const recovered = text.trim() ? text : errorText;
+      if (recovered) return { text: recovered, isError: true };
+      continue;
     }
+
+    if (text.trim()) return { text, isError: false };
   }
   return null;
 }
+
+
 
 /**
  * Append a branch_summary entry to the session file.

@@ -8,6 +8,7 @@ import assert from "node:assert/strict";
 import {
   classifyEntry,
   decideFailover,
+  describeExitedRun,
   formatReconcileNotice,
   panesToClose,
   planHasNews,
@@ -155,4 +156,39 @@ test("failover never fires on billing errors, clean exits, crashes, or an empty 
     decideFailover({ errorMessage: "overloaded", exitCode: 1, attemptsSoFar: 1, fallbacks: ["a", "b"] }),
     null,
   );
+});
+
+test("a run whose pane fell back to a shell keeps a recovered reply, errors stay errors", () => {
+  const done = describeExitedRun({
+    isCommand: false,
+    name: "worker",
+    recovered: { text: "W1-DONE", isError: false },
+  });
+  assert.equal(done.phase, "done");
+  assert.match(done.summary, /Sub-agent "worker" finished/);
+  assert.match(done.summary, /exit code lost/);
+  assert.match(done.summary, /W1-DONE$/);
+
+  const errored = describeExitedRun({
+    isCommand: false,
+    name: "worker",
+    recovered: { text: "Subagent error: overloaded", isError: true },
+  });
+  assert.equal(errored.phase, "error");
+
+  const blank = describeExitedRun({ isCommand: false, name: "worker", recovered: { text: "  ", isError: false } });
+  assert.equal(blank.phase, "unknown");
+  assert.match(blank.summary, /outcome is unknown/);
+});
+
+test("a command whose pane fell back to a shell reports partial output, never done", () => {
+  const out = describeExitedRun({
+    isCommand: true,
+    command: "npm test",
+    name: "tests",
+    partialOutput: "1 failing",
+  });
+  assert.equal(out.phase, "unknown");
+  assert.match(out.summary, /Command `npm test`/);
+  assert.match(out.summary, /1 failing$/);
 });

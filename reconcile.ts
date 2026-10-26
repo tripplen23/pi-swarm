@@ -34,6 +34,8 @@ export interface ReconcileEntry {
   exitFile?: string;
   /** Whether it may write in its worktree (drives writer warnings). */
   writes?: boolean;
+  /** Owning run: a newer run with the same name fences out stale writes. */
+  runId?: string;
   task?: string;
   cwd?: string | null;
   /** Budget in ms, so an adopted pane is still bounded by its original deadline. */
@@ -193,6 +195,42 @@ export function decideFailover(options: {
   if (NON_FAILOVER_ERROR_PATTERNS.some((pattern) => pattern.test(errorMessage))) return null;
   if (!FAILOVER_ERROR_PATTERNS.some((pattern) => pattern.test(errorMessage))) return null;
   return fallbacks[attemptsSoFar] ?? null;
+}
+
+/**
+ * What to record for a run whose pane fell back to its own shell, so the exit
+ * code was lost. An agent child that finished cleanly still has its last
+ * message in the session file: that is a result, not an unknown outcome.
+ */
+export function describeExitedRun(opts: {
+  isCommand: boolean;
+  command?: string;
+  name: string;
+  /** Last assistant reply recovered from the child's session, if any. */
+  recovered?: { text: string; isError: boolean } | null;
+  partialOutput?: string | null;
+}): { phase: "done" | "error" | "unknown"; summary: string } {
+  const subject = opts.isCommand ? `Command \`${opts.command ?? "?"}\`` : `Sub-agent "${opts.name}"`;
+  const lost = `${subject} finished, but its pane returned to a shell before the exit code was read ` +
+    `(exit code lost).`;
+  const recovered = opts.isCommand ? null : opts.recovered;
+
+  if (recovered?.text.trim()) {
+    // An errored turn is not a completed one, even though it has text.
+    return {
+      phase: recovered.isError ? "error" : "done",
+      summary: `${lost} Its last message was:\n\n${recovered.text.trim()}`,
+    };
+  }
+
+  const partial = opts.partialOutput ? `\n\n${opts.partialOutput}` : "";
+  return {
+    phase: "unknown",
+    summary:
+      `${subject} exited and the pane returned to its shell before the exit code was read, so its ` +
+      `outcome is unknown (no exit code, no result recorded). Check the working tree before ` +
+      `trusting its work.${partial}`,
+  };
 }
 
 /** True when the plan has anything worth waking the session for. */
