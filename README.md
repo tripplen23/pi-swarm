@@ -46,6 +46,7 @@ subagent({ agent: "worker", name: "dark-mode", task: "Implement the dark mode to
 | **researcher** | `opencode-go/deepseek-v4.1-flash` | web_search, web_fetch, safe_bash, codemode, mcp__firecrawl__* | Web research → sourced brief |
 | **worker** | `opencode-go/deepseek-v4.1-flash` | read, write, edit, bash, web_search, web_fetch (+ spawns scout/researcher/qa) | Implementer |
 | **reviewer** | `opencode-go/muse-spark-1.3-contributor` | read, grep, find, ls, safe_bash | Read-only code review |
+| **planner** | `google-vertex/gemini-4-argon` | read, write, grep, find, ls, safe_bash (+ spawns scout/researcher) | Architecture spec to `.pi/plans/`, never code |
 | **qa** | `opencode-go/deepseek-v4.1-flash` | read, grep, find, ls, safe_bash, codemode, mcp__playwright_chrome__*, mcp__playwright_webkit__* | Web-app QA via Playwright MCP |
 
 Model rationale:
@@ -54,6 +55,8 @@ Model rationale:
   fastest model with a 1M window; matches the low-thinking recon job.
 - **researcher / worker** — agentic, multi-step, long outputs. `deepseek-v4.1-flash`
   has a 384K output budget and strong tool use.
+- **planner** — read-only over code, writes only a spec. `max` thinking, because a
+  wrong interface in the spec costs a whole implementation.
 - **reviewer** — read-only, bounded output. `muse-spark-1.3-contributor` is an
   affordable 1M-context model; review is a good fit for a cheaper tier.
 
