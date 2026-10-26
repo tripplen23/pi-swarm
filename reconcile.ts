@@ -34,6 +34,8 @@ export interface ReconcileEntry {
   exitFile?: string;
   /** Whether it may write in its worktree (drives writer warnings). */
   writes?: boolean;
+  /** Owning run: a newer run with the same name fences out stale writes. */
+  runId?: string;
   task?: string;
   cwd?: string | null;
   /** Budget in ms, so an adopted pane is still bounded by its original deadline. */
@@ -204,18 +206,20 @@ export function describeExitedRun(opts: {
   isCommand: boolean;
   command?: string;
   name: string;
-  finalMessage?: string | null;
+  /** Last assistant reply recovered from the child's session, if any. */
+  recovered?: { text: string; isError: boolean } | null;
   partialOutput?: string | null;
-}): { phase: "done" | "unknown"; summary: string } {
+}): { phase: "done" | "error" | "unknown"; summary: string } {
   const subject = opts.isCommand ? `Command \`${opts.command ?? "?"}\`` : `Sub-agent "${opts.name}"`;
-  const finalMessage = opts.isCommand ? null : (opts.finalMessage ?? "").trim();
+  const lost = `${subject} finished, but its pane returned to a shell before the exit code was read ` +
+    `(exit code lost).`;
+  const recovered = opts.isCommand ? null : opts.recovered;
 
-  if (finalMessage) {
+  if (recovered?.text.trim()) {
+    // An errored turn is not a completed one, even though it has text.
     return {
-      phase: "done",
-      summary:
-        `${subject} finished, but its pane returned to a shell before the exit code was read ` +
-        `(exit code lost). Its last message was:\n\n${finalMessage}`,
+      phase: recovered.isError ? "error" : "done",
+      summary: `${lost} Its last message was:\n\n${recovered.text.trim()}`,
     };
   }
 

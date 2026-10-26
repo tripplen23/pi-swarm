@@ -158,18 +158,25 @@ test("failover never fires on billing errors, clean exits, crashes, or an empty 
   );
 });
 
-test("a run whose pane fell back to a shell keeps a recovered final message", () => {
-  const recovered = describeExitedRun({
+test("a run whose pane fell back to a shell keeps a recovered reply, errors stay errors", () => {
+  const done = describeExitedRun({
     isCommand: false,
     name: "worker",
-    finalMessage: "W1-DONE",
+    recovered: { text: "W1-DONE", isError: false },
   });
-  assert.equal(recovered.phase, "done");
-  assert.match(recovered.summary, /Sub-agent "worker" finished/);
-  assert.match(recovered.summary, /exit code lost/);
-  assert.match(recovered.summary, /W1-DONE$/);
+  assert.equal(done.phase, "done");
+  assert.match(done.summary, /Sub-agent "worker" finished/);
+  assert.match(done.summary, /exit code lost/);
+  assert.match(done.summary, /W1-DONE$/);
 
-  const blank = describeExitedRun({ isCommand: false, name: "worker", finalMessage: "   " });
+  const errored = describeExitedRun({
+    isCommand: false,
+    name: "worker",
+    recovered: { text: "Subagent error: overloaded", isError: true },
+  });
+  assert.equal(errored.phase, "error");
+
+  const blank = describeExitedRun({ isCommand: false, name: "worker", recovered: { text: "  ", isError: false } });
   assert.equal(blank.phase, "unknown");
   assert.match(blank.summary, /outcome is unknown/);
 });

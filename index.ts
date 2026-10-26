@@ -44,6 +44,7 @@ import {
   findLastAssistantMessage,
   getNewEntries,
   getSessionId,
+  findLastAssistantReply,
   listNameRegistry,
   readNameRegistry,
   readSubagentLoadout,
@@ -51,6 +52,7 @@ import {
   type NameRegistryEntry,
   resolveNameInRegistry,
   updateNameRegistry,
+  updateNameRegistryOwned,
   seedSubagentSessionFile,
   summarizeSessionStats,
   writeSubagentLoadout,
@@ -616,6 +618,7 @@ function recordSpawnState(running: RunningSubagent): void {
     startedAt: running.startTime,
     updatedAt: running.startTime,
     interactive: running.interactive,
+    runId: running.id,
     ...(running.timeoutMs ? { timeoutMs: running.timeoutMs } : {}),
     ...(running.cli ? { cli: running.cli } : {}),
     ...(running.sentinelFile ? { sentinelFile: running.sentinelFile } : {}),
@@ -637,7 +640,10 @@ function recordSpawnState(running: RunningSubagent): void {
 
 /** Merge a phase change (asking, running again) into the row. */
 function recordPhase(running: RunningSubagent, phase: ReconcileEntry["phase"]): void {
-  updateNameRegistry(running.artifactDir, running.name, { phase, updatedAt: Date.now() });
+  updateNameRegistryOwned(running.artifactDir, running.name, running.id, {
+    phase,
+    updatedAt: Date.now(),
+  });
 }
 
 /**
@@ -660,7 +666,7 @@ function recordFinish(
     const base = running.sessionFile || running.outputFile;
     if (base) resultFile = writeSubagentResult(base, outcome.summary);
   }
-  updateNameRegistry(running.artifactDir, running.name, {
+  updateNameRegistryOwned(running.artifactDir, running.name, running.id, {
     phase: outcome.phase,
     finishedAt: Date.now(),
     updatedAt: Date.now(),
@@ -685,7 +691,7 @@ function writeSubagentResult(sessionFile: string, summary: string): string | und
 
 /** Mark an outcome delivered, so a later restart does not report it twice. */
 function markReported(running: RunningSubagent): void {
-  updateNameRegistry(running.artifactDir, running.name, { reportedAt: Date.now() });
+  updateNameRegistryOwned(running.artifactDir, running.name, running.id, { reportedAt: Date.now() });
 }
 
 const statusConfig = loadStatusConfig();
@@ -2019,15 +2025,15 @@ async function watchSubagent(
     if (result.reason === "exited") {
       // The pane is back at its shell: the exit code is gone, but a finished
       // agent child still has its last message in its session file.
-      const finalMessage =
+      const recovered =
         running.cli === "command" || !existsSync(sessionFile)
           ? null
-          : findLastAssistantMessage(getNewEntries(sessionFile, 0));
+          : findLastAssistantReply(getNewEntries(sessionFile, 0));
       const outcome = describeExitedRun({
         isCommand: running.cli === "command",
         command: running.command,
         name,
-        finalMessage,
+        recovered,
         partialOutput: running.cli === "command" ? readCommandOutput(running.outputFile) : null,
       });
       const stats =
@@ -2388,6 +2394,9 @@ async function reconcileSubagents(pi: ExtensionAPI, ctx: ExtensionContext): Prom
         statusState: createStatusState({ source: entry.cli === "claude" ? "claude" : "pi", startTimeMs: startTime }),
       };
       runningSubagents.set(running.id, running);
+      // Claim the row: the run that owned this name is gone, and only the claim
+      // lets this watcher write its phase and result.
+      recordSpawnState(running);
       const watcherAbort = new AbortController();
       running.abortController = watcherAbort;
       startWidgetRefresh();

@@ -14,6 +14,7 @@ import {
   readNameRegistry,
   registerName,
   updateNameRegistry,
+  updateNameRegistryOwned,
 } from "./session.ts";
 
 function tempDir(): string {
@@ -79,4 +80,20 @@ test("registry writes are complete: the file always parses as JSON", () => {
   }
   const parsed = JSON.parse(readFileSync(nameRegistryPath(dir), "utf8"));
   assert.equal(Object.keys(parsed).length, 5);
+});
+
+test("a stale watcher cannot write a row that a newer run owns", () => {
+  const dir = tempDir();
+  registerName(dir, "worker", { sessionFile: "/tmp/w.jsonl", sessionId: "s", runId: "run-1" });
+
+  assert.equal(updateNameRegistryOwned(dir, "worker", "run-2", { phase: "done" }), false);
+  assert.equal(readNameRegistry(dir).worker.phase, undefined);
+
+  assert.equal(updateNameRegistryOwned(dir, "worker", "run-1", { phase: "done" }), true);
+  assert.equal(readNameRegistry(dir).worker.phase, "done");
+
+  // a name that moved to a new run ignores the old owner entirely
+  registerName(dir, "worker", { sessionFile: "/tmp/w.jsonl", sessionId: "s", runId: "run-2" });
+  assert.equal(updateNameRegistryOwned(dir, "worker", "run-1", { reportedAt: 1 }), false);
+  assert.equal(readNameRegistry(dir).worker.reportedAt, undefined);
 });
