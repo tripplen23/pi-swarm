@@ -31,6 +31,7 @@ import {
 
 import {
   decideFailover,
+  describeExitedRun,
   formatReconcileNotice,
   planHasNews,
   planReconcile,
@@ -754,8 +755,9 @@ function resolveResultPresentation(
   }
 
   if (result.error === "exited") {
-    const subject = result.command ? `Command \`${result.command}\`` : `Sub-agent "${name}"`;
-    return `${subject} exited and its pane returned to a shell prompt before the exit code was read — outcome unknown.\n\n${result.summary}${subject.startsWith("Sub-agent") ? sessionRef : ""}`;
+    // The summary already explains the lost exit code and carries whatever was
+    // recovered; a command has no session to follow up into.
+    return `${result.summary}${result.command ? "" : sessionRef}`;
   }
 
   if (result.command) {
@@ -2015,24 +2017,35 @@ async function watchSubagent(
     }
 
     if (result.reason === "exited") {
-      const what = running.cli === "command" ? `Command ${running.command}` : `Sub-agent "${name}"`;
-      const partial =
-        running.cli === "command" ? `\n\n${readCommandOutput(running.outputFile)}` : "";
-      const summary =
-        `${what} exited and the pane returned to its shell before the exit code was read, so its ` +
-        `outcome is unknown (no exit code, no result recorded). Check the working tree before ` +
-        `trusting its work.${partial}`;
-      recordFinish(running, { phase: "unknown", exitCode: -1, summary });
+      // The pane is back at its shell: the exit code is gone, but a finished
+      // agent child still has its last message in its session file.
+      const finalMessage =
+        running.cli === "command" || !existsSync(sessionFile)
+          ? null
+          : findLastAssistantMessage(getNewEntries(sessionFile, 0));
+      const outcome = describeExitedRun({
+        isCommand: running.cli === "command",
+        command: running.command,
+        name,
+        finalMessage,
+        partialOutput: running.cli === "command" ? readCommandOutput(running.outputFile) : null,
+      });
+      const stats =
+        outcome.phase === "done" && existsSync(sessionFile) ? summarizeSessionStats(sessionFile) : null;
+
+      recordFinish(running, { phase: outcome.phase, exitCode: -1, summary: outcome.summary });
+      closeSurface(surface);
       runningSubagents.delete(running.id);
       return {
         name,
         task,
-        summary,
+        summary: outcome.summary,
         sessionFile,
         ...(running.command ? { command: running.command } : {}),
         exitCode: -1,
         elapsed,
         error: "exited",
+        ...(stats ? { stats } : {}),
       };
     }
 

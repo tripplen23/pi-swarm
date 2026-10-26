@@ -195,6 +195,40 @@ export function decideFailover(options: {
   return fallbacks[attemptsSoFar] ?? null;
 }
 
+/**
+ * What to record for a run whose pane fell back to its own shell, so the exit
+ * code was lost. An agent child that finished cleanly still has its last
+ * message in the session file: that is a result, not an unknown outcome.
+ */
+export function describeExitedRun(opts: {
+  isCommand: boolean;
+  command?: string;
+  name: string;
+  finalMessage?: string | null;
+  partialOutput?: string | null;
+}): { phase: "done" | "unknown"; summary: string } {
+  const subject = opts.isCommand ? `Command \`${opts.command ?? "?"}\`` : `Sub-agent "${opts.name}"`;
+  const finalMessage = opts.isCommand ? null : (opts.finalMessage ?? "").trim();
+
+  if (finalMessage) {
+    return {
+      phase: "done",
+      summary:
+        `${subject} finished, but its pane returned to a shell before the exit code was read ` +
+        `(exit code lost). Its last message was:\n\n${finalMessage}`,
+    };
+  }
+
+  const partial = opts.partialOutput ? `\n\n${opts.partialOutput}` : "";
+  return {
+    phase: "unknown",
+    summary:
+      `${subject} exited and the pane returned to its shell before the exit code was read, so its ` +
+      `outcome is unknown (no exit code, no result recorded). Check the working tree before ` +
+      `trusting its work.${partial}`,
+  };
+}
+
 /** True when the plan has anything worth waking the session for. */
 
 /** Registry patches that close out a reconcile pass.

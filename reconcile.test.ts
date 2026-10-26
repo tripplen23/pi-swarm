@@ -8,6 +8,7 @@ import assert from "node:assert/strict";
 import {
   classifyEntry,
   decideFailover,
+  describeExitedRun,
   formatReconcileNotice,
   panesToClose,
   planHasNews,
@@ -155,4 +156,32 @@ test("failover never fires on billing errors, clean exits, crashes, or an empty 
     decideFailover({ errorMessage: "overloaded", exitCode: 1, attemptsSoFar: 1, fallbacks: ["a", "b"] }),
     null,
   );
+});
+
+test("a run whose pane fell back to a shell keeps a recovered final message", () => {
+  const recovered = describeExitedRun({
+    isCommand: false,
+    name: "worker",
+    finalMessage: "W1-DONE",
+  });
+  assert.equal(recovered.phase, "done");
+  assert.match(recovered.summary, /Sub-agent "worker" finished/);
+  assert.match(recovered.summary, /exit code lost/);
+  assert.match(recovered.summary, /W1-DONE$/);
+
+  const blank = describeExitedRun({ isCommand: false, name: "worker", finalMessage: "   " });
+  assert.equal(blank.phase, "unknown");
+  assert.match(blank.summary, /outcome is unknown/);
+});
+
+test("a command whose pane fell back to a shell reports partial output, never done", () => {
+  const out = describeExitedRun({
+    isCommand: true,
+    command: "npm test",
+    name: "tests",
+    partialOutput: "1 failing",
+  });
+  assert.equal(out.phase, "unknown");
+  assert.match(out.summary, /Command `npm test`/);
+  assert.match(out.summary, /1 failing$/);
 });
